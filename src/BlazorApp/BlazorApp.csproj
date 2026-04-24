@@ -5,6 +5,9 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <BlazorDisableThrowNavigationException>true</BlazorDisableThrowNavigationException>
+    <ContainerRegistry>ghcr.io</ContainerRegistry>
+    <ContainerImageName>blazorapp</ContainerImageName>
+    <ContainerImageTags>latest</ContainerImageTags>
   </PropertyGroup>
 
 </Project>
