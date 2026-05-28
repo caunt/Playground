@@ -1,30 +1,134 @@
-name: Publish .NET container to GitHub Packages
+name: Publish Container
 
 on:
+  workflow_dispatch:
   push:
+    branches: [ main ]
+  release:
+    types: [ created ]
 
 permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: publish-container-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  publish-container:
-    runs-on: ubuntu-latest
+  publish:
+    runs-on: ${{ matrix.operatingSystem }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { operatingSystem: ubuntu-latest, runtimeIdentifier: linux-x64, tagSuffix: linux-x64, isAlpine: false }
+          - { operatingSystem: ubuntu-24.04-arm, runtimeIdentifier: linux-arm64, tagSuffix: linux-arm64, isAlpine: false }
+          - { operatingSystem: ubuntu-24.04-arm, runtimeIdentifier: linux-arm, tagSuffix: linux-arm, isAlpine: false }
+          - { operatingSystem: ubuntu-latest, runtimeIdentifier: linux-musl-x64, tagSuffix: alpine-x64, isAlpine: true }
+          - { operatingSystem: ubuntu-24.04-arm, runtimeIdentifier: linux-musl-arm64, tagSuffix: alpine-arm64, isAlpine: true }
+          - { operatingSystem: windows-latest, runtimeIdentifier: win-x64, tagSuffix: windows, isAlpine: false, baseImage: 'mcr.microsoft.com/dotnet/runtime:10.0-nanoserver-ltsc2025' }
 
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Set up .NET
-        uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7 # v5
+      - name: Setup .NET
+        if: ${{ !matrix.isAlpine }}
+        uses: actions/setup-dotnet@9a946fdbd5fb07b82b2f5a4466058b876ab72bb2 # v5
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: '10'
 
-      - name: Restore
-        run: dotnet restore Playground.slnx
+      - name: Restore Dependencies
+        if: ${{ !matrix.isAlpine }}
+        run: dotnet restore src/BlazorApp/BlazorApp.csproj
 
-      - name: Publish container image
-        run: dotnet publish src/BlazorApp/BlazorApp.csproj --configuration Release /t:PublishContainer -p:ContainerRepository=${{ github.repository_owner }}/blazorapp
+      - name: Login to GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Install Linux Prerequisites
+        if: ${{ runner.os == 'Linux' && !matrix.isAlpine }}
+        run: |
+          sudo apt-get update
+          
+          if [ "${{ matrix.runtimeIdentifier }}" = "linux-arm" ]; then
+            sudo dpkg --add-architecture armhf
+            sudo apt-get update
+            sudo apt-get install -y clang zlib1g-dev libc6-dev:armhf libstdc++-13-dev:armhf gcc-arm-linux-gnueabihf
+          else
+            sudo apt-get install -y clang zlib1g-dev
+          fi
+
+      - name: Publish Container (Host)
+        if: ${{ !matrix.isAlpine }}
+        shell: bash
         env:
-          DOTNET_CONTAINER_REGISTRY_UNAME: ${{ github.actor }}
-          DOTNET_CONTAINER_REGISTRY_PWORD: ${{ secrets.GITHUB_TOKEN }}
+          ContainerRegistry: ghcr.io
+          ContainerRepository: caunt/blazorapp
+          ContainerPort: 8080
+          MSYS_NO_PATHCONV: 1
+          MSYS2_ARG_CONV_EXCL: '*'
+        run: |
+          imageTags="latest-${{ matrix.tagSuffix }}"
+          targetBaseImage="${{ matrix.baseImage }}"
+          
+          publishArguments=(
+            "src/BlazorApp/BlazorApp.csproj"
+            "-c" "Release"
+            "/t:PublishContainer"
+            "/p:RuntimeIdentifier=${{ matrix.runtimeIdentifier }}"
+            "/p:ContainerImageTags=$imageTags"
+          )
+          
+          if [ -n "$targetBaseImage" ]; then
+            publishArguments+=("/p:ContainerBaseImage=$targetBaseImage")
+          fi
+          
+          dotnet publish "${publishArguments[@]}"
+
+      - name: Publish Container (Alpine)
+        if: ${{ matrix.isAlpine }}
+        shell: bash
+        env:
+          ContainerRegistry: ghcr.io
+          ContainerRepository: caunt/blazorapp
+          ContainerPort: 8080
+        run: |
+          imageTags="latest-${{ matrix.tagSuffix }}"
+          
+          docker run --rm \
+            --volume "${{ github.workspace }}:/workspace" \
+            --volume "$HOME/.docker:/root/.docker:ro" \
+            --workdir /workspace \
+            --env ContainerRegistry="$ContainerRegistry" \
+            --env ContainerRepository="$ContainerRepository" \
+            --env ContainerPort="$ContainerPort" \
+            mcr.microsoft.com/dotnet/sdk:10.0-alpine \
+            sh -c "apk add --no-cache clang build-base zlib-dev && \
+                   dotnet restore src/BlazorApp/BlazorApp.csproj && \
+                   dotnet publish src/BlazorApp/BlazorApp.csproj \
+                   -c Release \
+                   /t:PublishContainer \
+                   /p:RuntimeIdentifier=\"${{ matrix.runtimeIdentifier }}\" \
+                   /p:ContainerImageTags=\"$imageTags\""
+
+  create-manifest:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login to GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Create and Push Manifest
+        env:
+          targetRepository: ghcr.io/caunt/blazorapp
+        run: |
+          docker manifest create $targetRepository:latest \
+            $targetRepository:latest-linux-x64 \
+            $targetRepository:latest-linux-arm64 \
+            $targetRepository:latest-linux-arm \
+            $targetRepository:latest-alpine-x64 \
+            $targetRepository:latest-alpine-arm64 \
+            $targetRepository:latest-windows
+            
+          docker manifest push $targetRepository:latest
