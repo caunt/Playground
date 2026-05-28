@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <BlazorDisableThrowNavigationException>true</BlazorDisableThrowNavigationException>
     <ContainerRegistry>ghcr.io</ContainerRegistry>
-    <ContainerImageName>blazorapp</ContainerImageName>
+    <ContainerRepository>caunt/blazorapp</ContainerRepository>
     <ContainerImageTags>latest</ContainerImageTags>
   </PropertyGroup>
 
